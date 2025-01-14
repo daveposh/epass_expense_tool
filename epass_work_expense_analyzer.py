@@ -65,6 +65,31 @@ def analyze_tool_expenses(file_path):
         ]
         work_hours = work_days[work_days['Time'].between('08:00:00', '20:00:00')]
         
+        # Calculate total amount
+        total_amount = work_hours['Amount'].sum()
+        
+        # Create a total row
+        total_row = pd.DataFrame([{
+            'Transponder Number': 'TOTAL',
+            'Date': '',
+            'Time': '',
+            'Posting Date': '',
+            'Location': '',
+            'Amount': total_amount,
+            'Toll Type': '',
+            'weekday': '',
+            'day_name': '',
+            'date_str': ''
+        }])
+        
+        # Concatenate the work_hours DataFrame with the total row
+        work_hours_with_total = pd.concat([work_hours, total_row], ignore_index=True)
+        
+        # Save expensable transactions with total to a new CSV file
+        expensable_file_path = f"expensable_{os.path.basename(file_path)}"
+        work_hours_with_total.to_csv(expensable_file_path, index=False)
+        print(f"Expensable transactions saved to {expensable_file_path}")
+        
         # Calculate expensable_days before using it
         expensable_days = len(work_hours['Date'].dt.date.unique())
         
