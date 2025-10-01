@@ -63,7 +63,9 @@ def analyze_tool_expenses(file_path):
             (~is_christmas) &  # not Christmas
             (~is_holiday)  # not a bank holiday
         ]
-        work_hours = work_days[work_days['Time'].between('08:00:00', '20:00:00')]
+        from datetime import time
+        work_hours = work_days[work_days['Time'].between(time(7, 30), time(20, 0))]
+        
         
         # Calculate total amount
         total_amount = work_hours['Amount'].sum()
@@ -90,15 +92,34 @@ def analyze_tool_expenses(file_path):
         work_hours_with_total.to_csv(expensable_file_path, index=False)
         print(f"Expensable transactions saved to {expensable_file_path}")
         
+        # Create a clean receipt CSV with only essential columns for expense submission
+        receipt_columns = ['Date', 'Time', 'Location', 'Amount']
+        receipt_data = work_hours[receipt_columns].copy()
+        
+        # Add total row
+        total_row_receipt = pd.DataFrame([{
+            'Date': '',
+            'Time': '',
+            'Location': 'TOTAL EXPENSABLE TOLLS',
+            'Amount': total_amount
+        }])
+        
+        receipt_with_total = pd.concat([receipt_data, total_row_receipt], ignore_index=True)
+        
+        # Save receipt CSV
+        receipt_file_path = f"receipt_{os.path.basename(file_path)}"
+        receipt_with_total.to_csv(receipt_file_path, index=False)
+        print(f"Expense receipt saved to {receipt_file_path}")
+        
         # Calculate expensable_days before using it
         expensable_days = len(work_hours['Date'].dt.date.unique())
         
         # Non-expensable transactions
         non_expensable = df[
-            (df['weekday'].isin([5, 6]) |  # Weekend
-             is_christmas |  # Christmas
-             is_holiday |  # Bank holiday
-             ~df['Time'].between('08:00:00', '20:00:00'))  # Outside work hours
+            df['weekday'].isin([5, 6]) |  # Weekend
+            is_christmas |  # Christmas
+            is_holiday |  # Bank holiday
+            ~df['Time'].between(time(7, 30), time(20, 0))  # Outside work hours
         ]
         
         # Get month and year from filename
@@ -111,7 +132,7 @@ def analyze_tool_expenses(file_path):
         print("=" * 60)
         
         # List all work week transactions
-        print("EXPENSABLE TRANSACTIONS (Workdays 8AM-8PM):")
+        print("EXPENSABLE TRANSACTIONS (Workdays 7:30AM-8PM):")
         print("-" * 60)
         for _, row in work_hours.sort_values(['Date', 'Time']).iterrows():
             print(f"{row['day_name']}, {row['Date'].strftime('%Y-%m-%d')}, {row['Time']}: ${row['Amount']:.2f} - {row['Location']}")
@@ -211,24 +232,41 @@ def read_csv(file_path):
             if df[col].dtype == 'object':
                 df[col] = df[col].str.strip('" ')
         
-        # Filter out rows that only contain dashes
-        valid_rows = ~(
-            (df['Date'].str.contains('^-+$', regex=True)) |
-            (df['Time'].str.contains('^-+$', regex=True)) |
-            (df['Amount'].str.contains('^-+$', regex=True))
-        )
+        # Filter out rows that only contain dashes (only check object columns)
+        valid_rows = pd.Series([True] * len(df), index=df.index)
+        
+        # Check Date column for dashes only if it's still object type
+        if df['Date'].dtype == 'object':
+            valid_rows &= ~df['Date'].str.contains('^-+$', regex=True, na=False)
+        
+        # Check Time column for dashes only if it's still object type  
+        if df['Time'].dtype == 'object':
+            valid_rows &= ~df['Time'].str.contains('^-+$', regex=True, na=False)
+        
+        # Check Amount column for dashes only if it's still object type
+        if df['Amount'].dtype == 'object':
+            valid_rows &= ~df['Amount'].str.contains('^-+$', regex=True, na=False)
+        
         df = df[valid_rows]
         print(f"Debug: After filtering dashes: {len(df)}")
         
         # Convert Amount to numeric
-        df['Amount'] = pd.to_numeric(df['Amount'])
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+        # Remove rows where Amount conversion failed
+        df = df.dropna(subset=['Amount'])
         print(f"Debug: After amount conversion: {len(df)}")
         
-        # Convert Date to datetime
-        df['Date'] = pd.to_datetime(df['Date'], format='%d-%b-%Y')
+        # Convert Date to datetime - handle both 2-digit and 4-digit years
+        df['Date'] = pd.to_datetime(df['Date'], format='%d-%b-%y', errors='coerce')
+        # Remove rows where Date conversion failed
+        df = df.dropna(subset=['Date'])
         
-        # Time is already in HH:MM:SS format
-        df['Time'] = df['Time'].str.strip()
+        # Time is already in HH:MM:SS format - only strip if it's still object type
+        if df['Time'].dtype == 'object':
+            df['Time'] = df['Time'].str.strip()
+        
+        # Convert Time to datetime.time for proper comparison
+        df['Time'] = pd.to_datetime(df['Time'], format='%H:%M:%S').dt.time
         
         print(f"Debug: Final DataFrame size: {len(df)}")
         print("\nDebug: Sample of processed data:")

@@ -1,5 +1,8 @@
 # Ignore all CSV files
 *.csv
+expensable_*
+receipt_*
+*.xls
 
 # Common Python files to ignore
 __pycache__/
