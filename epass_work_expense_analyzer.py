@@ -4,6 +4,186 @@ import calendar
 import os
 from io import StringIO
 import glob
+import re
+
+def filter_receipt_file(input_file_path):
+    """
+    Filter a receipt file to keep only Account Activity and work-hour vehicle activities.
+    Applies the same business logic as expensable analysis: weekdays 7:30AM-8PM, excluding holidays.
+    Creates a new filtered file with the same name but prefixed with 'receipt_'.
+    Adds a total row for the vehicle activities.
+    """
+    try:
+        print(f"\nFiltering receipt file: {input_file_path}")
+        
+        # Read the entire file as text
+        with open(input_file_path, 'r') as file:
+            lines = file.readlines()
+        
+        # Find Account Activity section
+        account_start = None
+        vehicle_start = None
+        
+        for i, line in enumerate(lines):
+            if line.strip() == "Account Activity":
+                account_start = i
+            elif line.strip() == "Vehicle Activity":
+                vehicle_start = i
+                break
+        
+        if account_start is None or vehicle_start is None:
+            print("Could not find Account Activity or Vehicle Activity sections")
+            return None
+        
+        # Extract Account Activity section (including header and data)
+        account_lines = []
+        for i in range(account_start, vehicle_start):
+            account_lines.append(lines[i])
+        
+        # Extract Vehicle Activity header
+        vehicle_header = lines[vehicle_start]
+        vehicle_header_line = lines[vehicle_start + 1]  # The actual CSV header
+        
+        # Get holidays for filtering
+        from datetime import datetime
+        year = 2025  # Default year, will be updated from data
+        holiday_names = get_us_holidays(year)
+        
+        # Extract and filter vehicle activities using business logic
+        filtered_vehicle_lines = [vehicle_header, vehicle_header_line]
+        total_amount = 0.0
+        
+        for i in range(vehicle_start + 2, len(lines)):
+            line = lines[i].strip()
+            if not line:  # Empty line
+                continue
+            
+            # Only process lines that start with transponder number
+            if not line.startswith('"3857335"'):
+                continue
+            
+            try:
+                # Parse the line to extract date, time, and amount
+                parts = line.split(',')
+                if len(parts) < 6:
+                    continue
+                
+                # Extract date and time
+                date_str = parts[1].strip('"')
+                time_str = parts[2].strip('"')
+                amount_str = parts[5].strip('"')
+                
+                # Parse date and time
+                date_obj = pd.to_datetime(date_str, format='%d-%b-%y')
+                time_obj = pd.to_datetime(time_str, format='%H:%M:%S').time()
+                
+                # Check if it's a workday (Monday=0, Sunday=6)
+                weekday = date_obj.weekday()
+                is_weekday = weekday < 5  # Monday to Friday
+                
+                # Check if it's during work hours (7:30 AM to 8:00 PM)
+                from datetime import time
+                is_work_hours = time(7, 30) <= time_obj <= time(20, 0)
+                
+                # Check if it's a holiday
+                date_str_for_holiday = date_obj.strftime('%Y-%m-%d')
+                is_holiday = date_str_for_holiday in holiday_names.index
+                
+                # Check if it's Christmas
+                is_christmas = (date_obj.month == 12) and (date_obj.day == 25)
+                
+                # Include only workday, work-hour, non-holiday transactions
+                if is_weekday and is_work_hours and not is_holiday and not is_christmas:
+                    filtered_vehicle_lines.append(lines[i])
+                    amount = float(amount_str)
+                    total_amount += amount
+                    
+            except (ValueError, IndexError, pd.errors.ParserError):
+                # If we can't parse the line, skip it
+                continue
+        
+        # Add total row
+        total_line = f'"TOTAL","","","","TOTAL WORK-HOUR VEHICLE ACTIVITIES","{total_amount:.2f}",""\n'
+        filtered_vehicle_lines.append(total_line)
+        
+        # Create the filtered content
+        filtered_content = ''.join(account_lines) + '\n' + ''.join(filtered_vehicle_lines)
+        
+        # Save the filtered file
+        output_file = f"receipt_{os.path.basename(input_file_path)}"
+        with open(output_file, 'w') as file:
+            file.write(filtered_content)
+        
+        print(f"Filtered receipt saved to: {output_file}")
+        print(f"Total work-hour vehicle activities amount: ${total_amount:.2f}")
+        return output_file
+        
+    except Exception as e:
+        print(f"Error filtering receipt file: {str(e)}")
+        return None
+
+def add_total_to_receipt_file(receipt_file_path):
+    """
+    Add a total row to an existing receipt file.
+    """
+    try:
+        print(f"\nAdding total to receipt file: {receipt_file_path}")
+        
+        # Read the entire file as text
+        with open(receipt_file_path, 'r') as file:
+            lines = file.readlines()
+        
+        # Find Vehicle Activity section
+        vehicle_start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "Vehicle Activity":
+                vehicle_start = i
+                break
+        
+        if vehicle_start is None:
+            print("Could not find Vehicle Activity section")
+            return None
+        
+        # Check if total already exists
+        has_total = any('TOTAL VEHICLE ACTIVITIES' in line for line in lines)
+        if has_total:
+            print("Total already exists in the file")
+            return receipt_file_path
+        
+        # Calculate total from existing vehicle activities
+        total_amount = 0.0
+        for i in range(vehicle_start + 2, len(lines)):
+            line = lines[i].strip()
+            if not line or 'TOTAL' in line:
+                continue
+            
+            # Include ALL vehicle activities (both with and without "E" in Toll Type)
+            if line.startswith('"3857335"'):
+                try:
+                    # Split by comma and get the amount (second to last field)
+                    parts = line.split(',')
+                    if len(parts) >= 6:  # Ensure we have enough parts
+                        amount_str = parts[5].strip('"')
+                        amount = float(amount_str)
+                        total_amount += amount
+                except (ValueError, IndexError):
+                    # If we can't parse the amount, continue without adding to total
+                    pass
+        
+        # Add total row at the end
+        total_line = f'"TOTAL","","","","TOTAL VEHICLE ACTIVITIES","{total_amount:.2f}",""\n'
+        
+        # Write back to file
+        with open(receipt_file_path, 'w') as file:
+            file.writelines(lines)
+            file.write(total_line)
+        
+        print(f"Total added to receipt file: ${total_amount:.2f}")
+        return receipt_file_path
+        
+    except Exception as e:
+        print(f"Error adding total to receipt file: {str(e)}")
+        return None
 
 def get_us_holidays(year):
     """Generate US Federal Holidays for a given year with their names."""
@@ -87,29 +267,15 @@ def analyze_tool_expenses(file_path):
         # Concatenate the work_hours DataFrame with the total row
         work_hours_with_total = pd.concat([work_hours, total_row], ignore_index=True)
         
-        # Save expensable transactions with total to a new CSV file
+        # Save expensable transactions with total to a new CSV file (retaining all fields)
         expensable_file_path = f"expensable_{os.path.basename(file_path)}"
         work_hours_with_total.to_csv(expensable_file_path, index=False)
         print(f"Expensable transactions saved to {expensable_file_path}")
         
-        # Create a clean receipt CSV with only essential columns for expense submission
-        receipt_columns = ['Date', 'Time', 'Location', 'Amount']
-        receipt_data = work_hours[receipt_columns].copy()
-        
-        # Add total row
-        total_row_receipt = pd.DataFrame([{
-            'Date': '',
-            'Time': '',
-            'Location': 'TOTAL EXPENSABLE TOLLS',
-            'Amount': total_amount
-        }])
-        
-        receipt_with_total = pd.concat([receipt_data, total_row_receipt], ignore_index=True)
-        
-        # Save receipt CSV
-        receipt_file_path = f"receipt_{os.path.basename(file_path)}"
-        receipt_with_total.to_csv(receipt_file_path, index=False)
-        print(f"Expense receipt saved to {receipt_file_path}")
+        # Automatically create filtered receipt file with Account Activity and only expendable vehicle activities
+        filtered_receipt_path = filter_receipt_file(file_path)
+        if filtered_receipt_path:
+            print(f"Filtered receipt with Account Activity and expendable vehicle activities saved to {filtered_receipt_path}")
         
         # Calculate expensable_days before using it
         expensable_days = len(work_hours['Date'].dt.date.unique())
@@ -124,8 +290,13 @@ def analyze_tool_expenses(file_path):
         
         # Get month and year from filename
         month_year = os.path.splitext(os.path.basename(file_path))[0]
-        month, year = month_year.split('_')
-        month_name = calendar.month_name[int(month)]
+        try:
+            month, year = month_year.split('_')
+            month_name = calendar.month_name[int(month)]
+        except (ValueError, IndexError):
+            # If filename doesn't match expected pattern, use a generic name
+            month_name = "Unknown"
+            year = "Unknown"
         
         # Print results
         print(f"\nToll Expense Report for {month_name} {year}")
@@ -285,6 +456,77 @@ def read_csv(file_path):
             pass
         return None
 
+def add_totals_to_all_receipts():
+    """Add totals to all existing receipt files."""
+    # Find all receipt files
+    receipt_files = glob.glob('receipt_*.csv')
+    
+    if not receipt_files:
+        print("No receipt files found.")
+        return
+    
+    print(f"\nFound {len(receipt_files)} receipt files to update:")
+    for file in receipt_files:
+        print(f"  - {file}")
+    
+    total_all_amount = 0.0
+    for receipt_file in sorted(receipt_files):
+        print(f"\n{'='*60}")
+        print(f"Updating: {receipt_file}")
+        print('='*60)
+        
+        # Add total to the receipt file
+        result = add_total_to_receipt_file(receipt_file)
+        if result:
+            # Extract the total amount from the file for summary
+            try:
+                with open(receipt_file, 'r') as file:
+                    lines = file.readlines()
+                for line in lines:
+                    if 'TOTAL VEHICLE ACTIVITIES' in line:
+                        parts = line.split(',')
+                        if len(parts) >= 6:
+                            amount_str = parts[5].strip('"')
+                            amount = float(amount_str)
+                            total_all_amount += amount
+                            break
+            except:
+                pass
+    
+    print(f"\n{'='*60}")
+    print(f"TOTAL AMOUNT ACROSS ALL RECEIPTS: ${total_all_amount:.2f}")
+    print('='*60)
+
+def process_all_files():
+    """Process all CSV files and create filtered receipts automatically."""
+    # Find all CSV files that match the pattern (month_year.csv)
+    csv_files = glob.glob('[0-9]*_2025.csv')
+    
+    if not csv_files:
+        print("No CSV files found matching the pattern (month_year.csv).")
+        return
+    
+    print(f"\nFound {len(csv_files)} CSV files to process:")
+    for file in csv_files:
+        print(f"  - {file}")
+    
+    total_amount = 0
+    for file_path in sorted(csv_files):
+        print(f"\n{'='*60}")
+        print(f"Processing: {file_path}")
+        print('='*60)
+        
+        # Create filtered receipt first
+        filtered_receipt_path = filter_receipt_file(file_path)
+        
+        # Then analyze the original file for expensable transactions
+        amount = analyze_tool_expenses(file_path)
+        total_amount += amount
+    
+    print(f"\n{'='*60}")
+    print(f"TOTAL EXPENSABLE AMOUNT ACROSS ALL FILES: ${total_amount:.2f}")
+    print('='*60)
+
 def get_csv_file():
     # Find all CSV files in the current directory
     csv_files = glob.glob('*.csv')
@@ -301,9 +543,13 @@ def get_csv_file():
     # Ask user to select a file
     while True:
         try:
-            choice = input("\nEnter the number of the file you want to process (or 'q' to quit): ")
+            choice = input("\nEnter the number of the file you want to process (or 'q' to quit, 'all' to process all, 'totals' to add totals to receipts): ")
             if choice.lower() == 'q':
                 return None
+            elif choice.lower() == 'all':
+                return 'ALL'
+            elif choice.lower() == 'totals':
+                return 'TOTALS'
             
             choice_idx = int(choice) - 1
             if 0 <= choice_idx < len(csv_files):
@@ -319,7 +565,11 @@ def get_csv_file():
 
 if __name__ == "__main__":
     file_name = get_csv_file()
-    if file_name:
+    if file_name == 'ALL':
+        process_all_files()
+    elif file_name == 'TOTALS':
+        add_totals_to_all_receipts()
+    elif file_name:
         analyze_tool_expenses(file_name)
     else:
         print("No file selected. Exiting.")
